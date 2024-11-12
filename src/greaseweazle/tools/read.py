@@ -111,6 +111,50 @@ def read_with_retry(usb: USB.Unit, args, t) -> Tuple[Flux, Optional[HasFlux]]:
     return flux, dat
 
 
+def cal_loop(usb: USB.Unit, args, t):
+
+    cyl, head = t.cyl, t.head
+
+    tspec = f'T{cyl}.{head}'
+    if t.physical_cyl != cyl or t.physical_head != head:
+        tspec += f' <- Drive {t.physical_cyl}.{t.physical_head}'
+
+    usb.seek(t.physical_cyl, t.physical_head)
+
+    flux = read_and_normalise(usb, args, args.revs, args.ticks)
+
+    dat = args.fmt_cls.decode_flux(cyl, head, flux)
+    for pll in plls[1:]:
+        if dat.nr_missing() == 0:
+            break
+        dat.decode_flux(flux, pll)
+
+    seek_retry, retry = 0, 0
+    while True:
+        s = "%s: %s from %s" % (tspec, dat.summary_string(),
+                                    flux.summary_string())
+        if retry != 0:
+            s += " (Retry #%u.%u)" % (seek_retry, retry)
+        print(s)
+        if args.retries == 0 or (retry % args.retries) == 0:
+            if args.retries == 0 or seek_retry > args.seek_retries:
+                print("%s: Giving up: %d sectors missing"
+                      % (tspec, dat.nr_missing()))
+                break
+            if retry != 0:
+                usb.seek(0, 0)
+                usb.seek(t.physical_cyl, t.physical_head)
+            seek_retry += 1
+            retry = 0
+        retry += 1
+        _flux = read_and_normalise(usb, args, max(args.revs, 3))
+        dat = args.fmt_cls.decode_flux(cyl, head, flux)
+        for pll in plls:
+            if dat.nr_missing() == 0:
+                break
+            dat.decode_flux(_flux, pll)
+
+
 def print_summary(args, summary: Dict[Tuple[int,int],codec.Codec]) -> None:
     if not summary:
         return
@@ -189,6 +233,9 @@ def read_to_image(usb: USB.Unit, args, image: image.Image) -> None:
 
     for t in args.tracks:
         cyl, head = t.cyl, t.head
+        if args.loop:
+            cal_loop(usb, args, t)
+            next
         flux, dat = read_with_retry(usb, args, t)
         if args.fmt_cls is not None and dat is not None:
             assert isinstance(dat, codec.Codec)
@@ -243,6 +290,8 @@ def main(argv) -> None:
                         help="drive interface density select on pin 2 (H,L)")
     parser.add_argument("--reverse", action="store_true",
                         help="reverse track data (flippy disk)")
+    parser.add_argument("--loop", action="store_true",
+                        help="continuously read tracks whether successful or not")
     parser.add_argument("file", help="output filename")
     parser.description = description
     parser.prog += ' ' + argv[1]
